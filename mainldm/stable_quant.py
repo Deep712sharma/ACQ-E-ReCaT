@@ -3,18 +3,22 @@ from load_clusters import prepare_cluster_data_for_quantization
 from integrate_entropy_model import (
     ClusterBasedQuantizer, 
     calculate_average_bitwidth,
-    apply_entropy_aware_quantization,
-    modify_forward_for_entropy_quant,
-    save_entropy_models,
-    load_entropy_models,
     find_matching_layer
 )
+# ADD THESE NEW IMPORTS
+from compression_integration import (
+    apply_entropy_aware_quantization_with_compression,
+    benchmark_compression_decompression,
+    compare_compression_methods,
+    load_and_use_compressed_model
+)
+from huffman_codec import ModelCompressor
+
 sys.path.append("./mainldm")
 sys.path.append("./mainddpm")
 sys.path.append('./src/taming-transformers')
 sys.path.append('.')
 print(sys.path)
-#os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import logging
 import cv2
 import torch
@@ -24,7 +28,6 @@ from omegaconf import OmegaConf
 from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm import tqdm, trange
-#from imwatermark import WatermarkEncoder
 from itertools import islice
 from einops import rearrange
 from torchvision.utils import make_grid
@@ -263,20 +266,33 @@ if __name__ == "__main__":
     parser.add_argument("--pow", type=float, default=1.5)
     
     # Cluster-based quantization arguments
-    parser.add_argument("--use_cluster_quant", action="store_true", default=False,
+    parser.add_argument("--use_cluster_quant", action="store_true", default=True,
                     help="Use cluster-based mixed precision quantization")
     parser.add_argument("--clustering_dir", type=str, default="./clustering_per_layer_stable",
                     help="Directory with pre-computed clustering files")
     
     # Entropy model arguments
-    parser.add_argument("--use_entropy_model", action="store_true", default=False,
+    parser.add_argument("--use_entropy_model", action="store_true", default=True,
                        help="Use learned entropy model for bit allocation")
     parser.add_argument("--train_entropy", action="store_true", default=False,
                        help="Train entropy models (vs loading pretrained)")
-    parser.add_argument("--entropy_iters", type=int, default=500,
+    parser.add_argument("--entropy_iters", type=int, default=10000,
                        help="Number of iterations to train entropy model")
     parser.add_argument("--entropy_models_path", type=str, default="./entropy.pth",
                        help="Path to save/load entropy models")
+    
+    # NEW: Compression arguments
+    parser.add_argument("--use_compression", action="store_true", default=True,
+                       help="Actually compress weights (vs just estimate)")
+    parser.add_argument("--compressed_model_path", type=str, 
+                       default="./compressed_model.pkl",
+                       help="Path to save/load compressed model")
+    parser.add_argument("--benchmark_compression", action="store_true", default=True,
+                       help="Benchmark compression/decompression speed")
+    parser.add_argument("--compare_methods", action="store_true", default=True,
+                       help="Compare Shannon entropy vs Huffman coding")
+    parser.add_argument("--load_compressed", action="store_true", default=False,
+                       help="Load pre-compressed model instead of compressing")
     
     args = parser.parse_args()
     if args.dps_steps:
@@ -284,7 +300,6 @@ if __name__ == "__main__":
     else:
         args.mode = "uni"
     benchmark = "coco"
-    #benchmark = "parti"
     seed_everything(args.seed)
     device = torch.device("cuda", args.local_rank)
 
@@ -349,113 +364,153 @@ if __name__ == "__main__":
 
         bitrate_info = None
         
-        # CLUSTER-BASED QUANTIZATION WITH ENTROPY MODEL
+        # CLUSTER-BASED QUANTIZATION WITH ENTROPY MODEL AND COMPRESSION
         if args.use_cluster_quant and args.use_entropy_model:
-            logger.info("\n" + "="*80)
-            logger.info("APPLYING CLUSTER-BASED QUANTIZATION WITH ENTROPY MODEL")
-            logger.info("="*80)
+            
+            # Load cluster data
             cluster_data = load_cluster_data(args.clustering_dir, q_unet)
             
-            cluster_quantizers, bitrate_info = apply_entropy_aware_quantization(
-                q_unet,
-                cluster_data,
-                args,
-                train_entropy=args.train_entropy,
-                num_entropy_iters=args.entropy_iters
-            )
-            
-            if args.train_entropy:
-                logger.info("Saving trained entropy models...")
-                save_entropy_models(cluster_quantizers, args.entropy_models_path)
-                logger.info(f"Entropy models saved at {args.entropy_models_path}")
-            else:
-                logger.info("Skipping save — entropy model was not trained (loading mode).")
-                logger.info("Loading pretrained entropy models...")
-                save_entropy_models(cluster_quantizers, args.entropy_models_path)
-
-            logger.info("\n🔧 Pre-quantizing weights for efficient inference...")
-            quantized_count = 0
-            
-            for name, module in q_unet.named_modules():
-                if not hasattr(module, 'org_weight'):
-                    continue
-                    
-                if name not in cluster_quantizers:
-                    continue
-                
-                quantizer = cluster_quantizers[name]
-                
-                org_weight = module.org_weight.cuda()
-                quantized_weight = quantizer.quantize_weights(org_weight)
-                
-                module.quantized_weight = quantized_weight
-                
-                if hasattr(module, 'org_module') and hasattr(module.org_module, 'weight'):
-                    module.org_module.weight.data = quantized_weight.clone()
-                    logger.info(f"  ✓ Quantized: {name} ({quantized_weight.numel()} params)")
-                    quantized_count += 1
-                elif hasattr(module, 'weight'):
-                    module.weight.data = quantized_weight.clone()
-                    logger.info(f"  ✓ Quantized: {name} ({quantized_weight.numel()} params)")
-                    quantized_count += 1
-            
-            logger.info(f"\n Pre-quantized {quantized_count} layers")
-            logger.info("Weights are now quantized and ready for inference")
-            logger.info("="*80 + "\n")
-            
-            if bitrate_info is not None:
-                avg_bitwidth = calculate_average_bitwidth(q_unet, cluster_quantizers)
-                logger.info(f"Average bitwidth: {avg_bitwidth:.3f} bits/weight")
-                logger.info(f"Compression ratio: {32.0/avg_bitwidth:.2f}x from FP32")
-
-        elif args.use_cluster_quant:
-            logger.info("\n" + "="*80)
-            logger.info("APPLYING CLUSTER-BASED QUANTIZATION (NO ENTROPY MODEL)")
-            logger.info("="*80)
-            
-            cluster_data = load_cluster_data(args.clustering_dir, q_unet)
-            
-            cluster_quantizers = {}
-            quantized_count = 0
-            
-            for name, module in q_unet.named_modules():
-                if not hasattr(module, 'org_weight'):
-                    continue
-                
-                cluster_key = find_matching_layer(name, cluster_data['layer_clusters'])
-                if cluster_key is None:
-                    continue
-                
-                cluster_info = cluster_data['layer_clusters'][cluster_key]
-                
-                quantizer = ClusterBasedQuantizer(
-                    clusters=cluster_info['clusters'],
-                    densities=cluster_info['densities'],
-                    assignments=cluster_info['assignments'],
-                    num_clusters=len(cluster_info['clusters'])
+            # OPTION 1: Load pre-compressed model
+            if args.load_compressed:
+                logger.info("\n📦 Loading pre-compressed model...")
+                model_compressor = load_and_use_compressed_model(
+                    args.compressed_model_path,
+                    q_unet,
+                    test_inference=False
                 )
-                cluster_quantizers[name] = quantizer
                 
-                org_weight = module.org_weight.cuda()
-                quantized_weight = quantizer.quantize_weights(org_weight)
+                # Get quantizers and compressed layers
+                compressed_layers, quantizer_configs = ModelCompressor.load_compressed_model(
+                    args.compressed_model_path
+                )
                 
-                if hasattr(module, 'org_module') and hasattr(module.org_module, 'weight'):
-                    module.org_module.weight.data = quantized_weight.clone()
-                    quantized_count += 1
-                elif hasattr(module, 'weight'):
-                    module.weight.data = quantized_weight.clone()
-                    quantized_count += 1
+                # Recreate quantizers
+                cluster_quantizers = {}
+                for name, config in quantizer_configs.items():
+                    quantizer = ClusterBasedQuantizer(
+                        clusters=config['clusters'],
+                        densities=config['densities'],
+                        assignments=config['assignments'],
+                        num_clusters=config['num_clusters']
+                    )
+                    quantizer.bit_allocation = config['bit_allocation'].cuda()
+                    cluster_quantizers[name] = quantizer
+                
+                # Decompress weights into model
+                model_compressor = ModelCompressor(cluster_quantizers)
+                model_compressor.compressed_layers = compressed_layers
+                
+                logger.info("🔄 Decompressing weights into model...")
+                for name in compressed_layers.keys():
+                    weights = model_compressor.decompress_layer(name)
+                    for module_name, module in q_unet.named_modules():
+                        if module_name == name and hasattr(module, 'org_weight'):
+                            if hasattr(module, 'org_module'):
+                                module.org_module.weight.data = weights.cuda()
+                            elif hasattr(module, 'weight'):
+                                module.weight.data = weights.cuda()
+                            logger.info(f"  ✓ Loaded: {name}")
+                
+                logger.info("✅ Compressed model loaded and decompressed")
+                bitrate_info = None
             
-            logger.info(f" Pre-quantized {quantized_count} layers")
+            # OPTION 2: Compress model now
+            else:
+                logger.info("\n🗜️  Compressing model with Huffman coding...")
+                
+                # Apply compression-aware quantization
+                cluster_quantizers, bitrate_info, compressed_layers = \
+                    apply_entropy_aware_quantization_with_compression(
+                        q_unet,
+                        cluster_data,
+                        args,
+                        train_entropy=args.train_entropy,
+                        num_entropy_iters=args.entropy_iters,
+                        use_compression=args.use_compression,
+                        save_compressed=True,
+                        compressed_model_path=args.compressed_model_path
+                    )
+                
+                # Optional: Benchmark performance
+                if args.benchmark_compression and compressed_layers:
+                    benchmark_compression_decompression(
+                        compressed_layers,
+                        cluster_quantizers,
+                        num_trials=10
+                    )
+                
+                # Optional: Compare theory vs practice
+                if args.compare_methods:
+                    compare_compression_methods(
+                        q_unet,
+                        cluster_quantizers,
+                        sample_layers=5
+                    )
+                
+                # Decompress weights for inference
+                if args.use_compression and compressed_layers:
+                    logger.info("\n🔄 Decompressing weights into model for inference...")
+                    
+                    model_compressor = ModelCompressor(cluster_quantizers)
+                    model_compressor.compressed_layers = compressed_layers
+                    
+                    quantized_count = 0
+                    for name in compressed_layers.keys():
+                        weights = model_compressor.decompress_layer(name)
+                        
+                        for module_name, module in q_unet.named_modules():
+                            if module_name == name and hasattr(module, 'org_weight'):
+                                if hasattr(module, 'org_module'):
+                                    module.org_module.weight.data = weights.cuda()
+                                    quantized_count += 1
+                                elif hasattr(module, 'weight'):
+                                    module.weight.data = weights.cuda()
+                                    quantized_count += 1
+                                break
+                    
+                    logger.info(f"✅ Decompressed {quantized_count} layers for inference")
+                
+                else:
+                    # No compression - use quantized weights directly
+                    logger.info("\n📊 Using quantized weights (no compression)")
+                    quantized_count = 0
+                    
+                    for name, quantizer in cluster_quantizers.items():
+                        for module_name, module in q_unet.named_modules():
+                            if module_name == name and hasattr(module, 'org_weight'):
+                                org_weight = module.org_weight.cuda()
+                                quantized_weight = quantizer.quantize_weights(org_weight)
+                                
+                                if hasattr(module, 'org_module'):
+                                    module.org_module.weight.data = quantized_weight.clone()
+                                    quantized_count += 1
+                                elif hasattr(module, 'weight'):
+                                    module.weight.data = quantized_weight.clone()
+                                    quantized_count += 1
+                                break
+                    
+                    logger.info(f"✅ Quantized {quantized_count} layers")
             
-            avg_bitwidth = calculate_average_bitwidth(q_unet, cluster_quantizers)
-            logger.info(f"Average bitwidth: {avg_bitwidth:.3f} bits")
-
-        #if args.recon is False:
-            #pre_err_list = torch.load(f"./error_dec/stable/pre_quanterr_abCov_weight{args.weight_bit}_interval{args.replicate_interval}_{benchmark}_list.pth")
-            #q_unet.model.output_blocks[-1][0].skip_connection.pre_err = pre_err_list
-            #pre_norm_err_list = torch.load(f"./error_dec/stable/pre_norm_quanterr_abCov_weight{args.weight_bit}_interval{args.replicate_interval}_{benchmark}_list.pth")
-            #q_unet.model.output_blocks[-1][0].in_layers[2].pre_err = pre_norm_err_list
+            # Calculate final statistics
+            if bitrate_info is not None:
+                avg_bitwidth, avg_quant_value, analysis_results = average(q_unet, args, bitrate_info)
+            else:
+                avg_bitwidth, avg_quant_value, analysis_results = average(q_unet, args)
+            
+            logger.info(f"✅ Final average bitwidth: {avg_bitwidth:.3f} bits")
+            logger.info(f"✅ Average quantized weight value: {avg_quant_value:.6f}")
+            
+            # Calculate actual model size
+            if args.use_cluster_quant:
+                total_bits, total_MB, comp_ratio = compute_actual_model_size(
+                    q_unet,
+                    cluster_quantizers=cluster_quantizers
+                )
+                
+                logger.info("=" * 80)
+                logger.info(f"📦 Actual model size: {total_MB:.2f} MB")
+                logger.info(f"📉 True compression ratio (vs FP32): {comp_ratio:.2f}x")
+                logger.info("=" * 80)
 
         logger.info("\n🔧 Enabling quantization state...")
         q_unet.set_quant_state(weight_quant=False if args.use_cluster_quant else True, act_quant=True)
@@ -515,46 +570,9 @@ if __name__ == "__main__":
             q_unet.model.save_cache = True
             setattr(model.model, 'diffusion_model', q_unet)
 
-        logger.info("\nCalculating final statistics...")
-        if args.use_cluster_quant and args.use_entropy_model and bitrate_info is not None:
-            avg_bitwidth, avg_quant_value, analysis_results = average(q_unet, args, bitrate_info)
-        else:
-            avg_bitwidth, avg_quant_value, analysis_results = average(q_unet, args)
-        
-        logger.info(f"✅ Final average bitwidth: {avg_bitwidth:.3f} bits")
-        logger.info(f"✅ Average quantized weight value: {avg_quant_value:.6f}")
-
-        if args.use_cluster_quant:
-            total_bits, total_MB, comp_ratio = compute_actual_model_size(
-                q_unet,
-                cluster_quantizers=cluster_quantizers
-            )
-
-            logger.info("=" * 80)
-            logger.info(f"📦 Actual model size: {total_MB:.2f} MB")
-            logger.info(f"📉 True compression ratio (vs FP32): {comp_ratio:.2f}x")
-            logger.info("=" * 80)
-        else:
-            logger.info("📦 Model size calculation skipped (no cluster quantization)")
-
-        if args.use_cluster_quant:
-            total_bits, total_MB, comp_ratio = compute_actual_model_size(
-                q_unet,
-                cluster_quantizers=cluster_quantizers
-            )
-
-            logger.info("=" * 80)
-            logger.info(f"📦 Actual model size: {total_MB:.2f} MB")
-            logger.info(f"📉 True compression ratio (vs FP32): {comp_ratio:.2f}x")
-            logger.info("=" * 80)
-        else:
-            logger.info("📦 Model size calculation skipped (no cluster quantization)")
-
     model.model.diffusion_model.a_list = torch.stack(a_list)
     model.model.diffusion_model.b_list = torch.stack(b_list)
     if benchmark == "coco":
-        # logging.info(f"reading prompts from {args.from_file}")
-        # data = get_prompts(args.from_file)
         file_path = './mainldm/prompt/MSCOCO.txt'
         with open(file_path, 'r', encoding='utf-8') as file:
             lines = file.readlines()
@@ -592,8 +610,6 @@ if __name__ == "__main__":
     logging.info("sampling...")
     logging.info("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
     wm = "StableDiffusionV1"
-    #wm_encoder = WatermarkEncoder()
-    #wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
     base_count = 0
 
     data = args.list_prompts
@@ -631,9 +647,10 @@ if __name__ == "__main__":
                     for x_sample in x_checked_image_torch:
                         x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                         img = Image.fromarray(x_sample.astype(np.uint8))
-                        #img = put_watermark(img, wm_encoder)
                         img.save(os.path.join(imglogdir, f"{base_count:05}.png"))
                         base_count += 1
                 toc = time.time()
 
     logging.info("✅ ALL DONE! Images saved to: " + imglogdir)
+    logging.info(f"⏱️  Total generation time: {toc-tic:.2f} seconds")
+    logging.info(f"📊 Average time per image: {(toc-tic)/base_count:.2f} seconds")
