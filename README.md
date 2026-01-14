@@ -1,10 +1,10 @@
-# ACQ-E-ReCaT
+# ACQ-E+ReCaT
 ---
 ## 📖 INTRODUCTION
 ---
 #### This repository contains official implementation of Unified Adaptive Quantization and Representation-Aware Caching for Diffusion Models paper.
 #### This introduces- 
-#### - ACQ-E, a histogram-guided clustering and adaptive mixed-precision quantization method for efficient weight storage, complementedby learned entropy encoding for compact model representation.
+#### – ACQ-E, a histogram-guided clustering and adaptive mixed-precision quantization method for efficient weight storage, complementedby learned entropy encoding for compact model representation.
 #### – ReCaT, a representation-aware activation caching strategy that selects effective caching points along the diffusion trajectory based on representational similarity measured using centered kernel alignment (CKA)[23].
 #### – a unified framework that improves the runtime efficiency of diffusion models through representation-aware activation reuse and efficient weight storage, validated through extensive experimental evaluation.
 ![ACQ-E+ReCaT pipeline](assets/pipeline.jpeg)
