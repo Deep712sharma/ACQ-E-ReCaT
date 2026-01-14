@@ -22,6 +22,16 @@ conda activate equant
 bash mainldm/scripts/download_models.sh
 ```
 ---
+## 📥 Stable Diffusion Checkpoint
+
+This project requires the **Stable Diffusion v1.4 `.ckpt` model file**, which must be downloaded manually.
+
+#### 1. Go to the model page:  
+####   👉 [sd-v1-4](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
+
+#### 2. Click **Files and versions → `sd-v1-4.ckpt` → Download**.
+---
+---
 ## 📕 Data <br>
 #### Please download all original datasets used for evaluation from each dataset’s official website.
 ---
