@@ -1,7 +1,7 @@
 # ACQ-E+ReCaT
 ---
 ## 📖 INTRODUCTION
----
+
 #### This repository contains official implementation of Unified Adaptive Quantization and Representation-Aware Caching for Diffusion Models paper.
 #### This introduces- 
 #### – ACQ-E, a histogram-guided clustering and adaptive mixed-precision quantization method for efficient weight storage, complementedby learned entropy encoding for compact model representation.
@@ -30,7 +30,7 @@ This project requires the **Stable Diffusion v1.4 `.ckpt` model file**, which mu
 ####   👉 [sd-v1-4](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
 
 #### 2. Click **Files and versions → `sd-v1-4.ckpt` → Download**.
----
+
 ---
 ## 📕 Data <br>
 #### Please download all original datasets used for evaluation from each dataset’s official website.
