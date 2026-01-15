@@ -12,9 +12,9 @@
 ## 🗝️ Environment <br>
 #### Create and activate a suitable conda environment named equant by using the following commands:
 ```bash
-cd E-Quant
+cd ACQ-E-ReCaT
 conda env create -f environment.yaml
-conda activate equant
+conda activate acqeandrecat
 ```
 ---
 ## 💠 Download Checkpoints
