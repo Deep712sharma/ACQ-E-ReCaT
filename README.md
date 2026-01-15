@@ -30,6 +30,7 @@ This project requires the **Stable Diffusion v1.4 `.ckpt` model file**, which mu
 ####   👉 [sd-v1-4](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original)
 
 #### 2. Click **Files and versions → `sd-v1-4.ckpt` → Download**.
+#### 3. Move the downloaded checkpoint to "ACQ-E-ReCaT/mainldm/models/ldm/stable-diffusion-v1/"
 
 ---
 ## 📕 Data <br>
