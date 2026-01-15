@@ -1,4 +1,4 @@
-name: equant
+name: acqeandrecat
 channels:
   - pytorch
   - defaults
